@@ -13,15 +13,16 @@ from PIL import Image
 
 from detector import Detector
 from utils import generate_unique_id, encode_image_to_base64
-from milvus_client import MilvusClientWrapper
+from chroma_client import ChromaClientWrapper
+from multimodal_embedding_serving import get_model_handler, EmbeddingModel
 
 
 DEVICE = os.getenv("DEVICE", "CPU")
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", None)
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "openai/clip-vit-base-patch32")
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "CLIP/clip-vit-b-16")
 
 
-def create_milvus_data(embedding, meta=None):
+def create_chroma_data(embedding, meta=None):
     data = {}
     data["id"] = generate_unique_id()
     data["meta"] = meta
@@ -35,16 +36,19 @@ class Indexer:
         #     exit(1)
 
         self.model_name = EMBEDDING_MODEL_NAME
-        self.embed_url = EMBEDDING_BASE_URL
+        
+        handler = get_model_handler(self.model_name)
+        handler.load_model()
+        self.embedding_model = EmbeddingModel(handler)
 
         self.detector = Detector(device=DEVICE)
 
         self.id_map = {}
         self.db_inited = False
-        self.client = MilvusClientWrapper()
+        self.client = ChromaClientWrapper()
         self.collection_name = collection_name
 
-        if self.client.load_collection(collection_name=self.collection_name) == 3:  # loaded
+        if self.client.load_collection(collection_name=self.collection_name):
             print(f"Collection '{self.collection_name}' already exist.")
             self.db_inited = True
             self.recover_id_map()
@@ -63,7 +67,7 @@ class Indexer:
             return False
 
     def init_db_client(self, dim):
-        self.client.create_collection(dim, collection_name=self.collection_name)
+        self.client.create_collection(collection_name=self.collection_name)
 
         self.db_inited = True
         self.recover_id_map()
@@ -83,7 +87,7 @@ class Indexer:
                 file_path = item["meta"]["file_path"]
                 if file_path not in self.id_map:
                     self.id_map[file_path] = []
-                self.id_map[file_path].append(item["id"])
+                self.id_map[file_path].append(int(item["id"]))
 
     def count_files(self):
         files = set()
@@ -136,22 +140,11 @@ class Indexer:
         return res, ids
     
     def get_image_embedding(self, image):
-        base64_img = encode_image_to_base64(image)
-        headers = { 'Content-Type': 'application/json'}
-
-        payload = {
-            "model": EMBEDDING_MODEL_NAME,
-            "encoding_format": "float",
-            "input": {
-                "type": "image_base64",
-                "image_base64": base64_img
-            }
-        }
-    
-        response = requests.post(f"{self.embed_url}/embeddings", json=payload, headers=headers, timeout=10)
-        data = response.json()
-        embedding = data["embedding"]
-        return embedding
+        embedding_tensor = self.embedding_model.handler.encode_image(image)
+        # Convert tensor to a list of floats for ChromaDB
+        embedding_list = embedding_tensor.cpu().numpy().tolist()
+        # The result is a batch of one, so we extract the single embedding list
+        return embedding_list[0]
         
     def process_video(self, video_path, meta, frame_interval=15, minimal_duration=1, do_detect_and_crop=True):
         entities = []
@@ -172,14 +165,14 @@ class Indexer:
                         embedding = self.get_image_embedding(crop)
                         if not self.db_inited:
                             self.init_db_client(len(embedding))
-                        node = create_milvus_data(embedding, meta_data)
+                        node = create_chroma_data(embedding, meta_data)
                         entities.append(node)
                         self.update_id_map(meta_data["file_path"], node["id"])
 
                 embedding = self.get_image_embedding(image)
                 if not self.db_inited:
                     self.init_db_client(len(embedding))
-                node = create_milvus_data(embedding, meta_data)
+                node = create_chroma_data(embedding, meta_data)
                 entities.append(node)
                 self.update_id_map(meta_data["file_path"], node["id"])
             frame_counter += 1
@@ -196,14 +189,14 @@ class Indexer:
                 embedding = self.get_image_embedding(crop)
                 if not self.db_inited:
                     self.init_db_client(len(embedding))
-                node = create_milvus_data(embedding, meta_data)
+                node = create_chroma_data(embedding, meta_data)
                 entities.append(node)
                 self.update_id_map(meta_data["file_path"], node["id"])
         
         embedding = self.get_image_embedding(image)
         if not self.db_inited:
             self.init_db_client(len(embedding))
-        node = create_milvus_data(embedding, meta_data)
+        node = create_chroma_data(embedding, meta_data)
         entities.append(node)
         self.update_id_map(meta_data["file_path"], node["id"])
         return entities
