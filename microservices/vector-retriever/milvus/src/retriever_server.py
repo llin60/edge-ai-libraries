@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 import os
 import logging
 
-from retriever_milvus import MilvusRetriever
+from retriever_chroma import ChromaRetriever
 
 from pydantic import BaseModel
 from typing import Optional, Dict
@@ -29,7 +29,7 @@ class RetrievalRequest(BaseModel):
 
 app = FastAPI()
 
-retriever = MilvusRetriever()
+retriever = ChromaRetriever()
 
 @app.get("/v1/retrieval/health")
 def health():
@@ -77,12 +77,13 @@ async def retrieval(request: RetrievalRequest):
 
         # Format results
         ret = []
-        for hit in results:
-            ret.append({
-                "id": hit.get("id"),
-                "distance": hit.get('distance'),
-                "meta": hit.get("entity").get("meta")
-            })
+        if results and results['ids']:
+            for i in range(len(results['ids'][0])):
+                ret.append({
+                    "id": results['ids'][0][i],
+                    "distance": results['distances'][0][i],
+                    "meta": results['metadatas'][0][i]
+                })
 
         # Return the results
         return JSONResponse(
